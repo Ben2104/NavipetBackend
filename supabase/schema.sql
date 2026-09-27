@@ -7,6 +7,7 @@ create table if not exists public.profiles (
     check (char_length(display_name) between 1 and 80),
   email text,
   role text check (role in ('student', 'professor')),
+  avatar_path text not null default 'defaults/avatar.webp',
   avatar_color bigint not null default 4294946816,
   gems integer not null default 0 check (gems >= 0),
   level integer not null default 1 check (level >= 1),
@@ -15,6 +16,27 @@ create table if not exists public.profiles (
 );
 
 alter table public.profiles enable row level security;
+
+-- Avatars are written only by the backend's service role, which enforces the
+-- size and image-type checks; `authenticated` has no storage.objects policies
+-- on this bucket. Objects are served through short-lived signed URLs.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'avatars',
+  'avatars',
+  false,
+  5242880,
+  array['image/jpeg', 'image/png', 'image/webp']
+)
+on conflict (id) do update set
+  public = false,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "Avatar files are publicly readable" on storage.objects;
+drop policy if exists "Users can upload their avatar files" on storage.objects;
+drop policy if exists "Users can update their avatar files" on storage.objects;
+drop policy if exists "Users can delete their avatar files" on storage.objects;
 
 grant select, update on table public.profiles to authenticated;
 grant select, update on table public.profiles to service_role;
@@ -81,15 +103,22 @@ create table if not exists public.classes (
   user_id uuid not null references auth.users(id) on delete cascade,
   course_code text not null check (char_length(course_code) between 1 and 30),
   course_name text not null check (char_length(course_name) between 1 and 100),
-  building text not null check (char_length(building) between 1 and 100),
+  building text not null,
   room text not null default '',
   weekdays smallint[] not null default '{}' check (weekdays <@ array[1,2,3,4,5,6,7]::smallint[]),
   start_time time not null default '09:00',
   end_time time not null default '10:00' check (end_time > start_time),
-  latitude double precision not null,
-  longitude double precision not null,
+  -- Online classes have no physical location: building may be empty and
+  -- coordinates are null. In-person classes require both.
+  is_online boolean not null default false,
+  latitude double precision,
+  longitude double precision,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint classes_building_check
+    check (char_length(building) <= 100 and (is_online or char_length(building) >= 1)),
+  constraint classes_in_person_coordinates_check
+    check (is_online or (latitude is not null and longitude is not null))
 );
 
 create index if not exists classes_user_id_idx on public.classes(user_id);
@@ -248,7 +277,7 @@ create table if not exists public.task_completions (
   user_id uuid not null references auth.users(id) on delete cascade,
   class_id uuid not null references public.classes(id) on delete cascade,
   task_date date not null,
-  task_kind text not null check (task_kind in ('attend', 'prepare')),
+  task_kind text not null check (task_kind in ('attend', 'prepare', 'attend_online')),
   completed_at timestamptz not null default now(),
   primary key (user_id, class_id, task_date, task_kind)
 );

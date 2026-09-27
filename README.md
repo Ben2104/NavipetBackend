@@ -54,11 +54,14 @@ SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_ANON_KEY=<publishable-or-anon-key>
 SUPABASE_JWT_ISSUER=https://<project-ref>.supabase.co/auth/v1
 SUPABASE_JWT_AUDIENCE=authenticated
+SUPABASE_SERVICE_ROLE_KEY=<server-only-service-role-key>
 ```
 
 The publishable key belongs in `SUPABASE_ANON_KEY`. `SUPABASE_SERVICE_ROLE_KEY`
-is required by the server's password-reset completion flow to revoke the used
-recovery session; never expose it to a client.
+is required by server-only administrative operations, including password-reset
+session revocation and profile avatar uploads. Copy it from Supabase Dashboard →
+Project Settings → API → the service-role secret. Never expose it to a client
+or commit it to source control.
 
 Start the development server:
 

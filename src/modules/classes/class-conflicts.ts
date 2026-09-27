@@ -56,6 +56,12 @@ function timesOverlap(a: ClassSchedule, b: ClassSchedule): boolean {
  * the candidate. A class with no weekdays is asynchronous and never conflicts.
  * `ignoreClassId` excludes the class being edited from its own check.
  */
+function conflictLocation(record: ClassRecord): string {
+  const place = [record.building, record.room].filter((part) => part !== '').join(' ');
+  if (!record.isOnline) return place;
+  return place === '' ? 'Online' : `Online (${place})`;
+}
+
 export function findClassConflicts(
   candidate: ClassSchedule,
   existing: readonly ClassRecord[],
@@ -73,7 +79,7 @@ export function findClassConflicts(
         day: DAY_LABELS[day] ?? String(day),
         newTime: formatRange(candidate),
         existingTime: formatRange(other),
-        location: other.room === '' ? other.building : `${other.building} ${other.room}`,
+        location: conflictLocation(other),
       });
     }
   }

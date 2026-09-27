@@ -19,6 +19,7 @@ function existing(overrides: Partial<ClassRecord> = {}): ClassRecord {
     weekdays: [2, 4],
     startTime: '09:00:00',
     endTime: '10:00:00',
+    isOnline: false,
     latitude: 33.783,
     longitude: -118.112,
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -63,6 +64,15 @@ describe('findClassConflicts', () => {
       },
       expect.objectContaining({ day: 'Th' }),
     ]);
+  });
+
+  it('labels an online class location as Online', () => {
+    const online = existing({ isOnline: true, building: '', room: '', latitude: null, longitude: null });
+    const [first] = findClassConflicts(candidate(), [online]);
+    expect(first?.location).toBe('Online');
+
+    const withRoom = existing({ isOnline: true, building: '', room: 'Zoom', latitude: null, longitude: null });
+    expect(findClassConflicts(candidate(), [withRoom])[0]?.location).toBe('Online (Zoom)');
   });
 
   it('flags a partial overlap', () => {
