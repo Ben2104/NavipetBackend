@@ -7,8 +7,11 @@ export interface ClassRecord {
   weekdays: number[];
   startTime: string;
   endTime: string;
-  latitude: number;
-  longitude: number;
+  isOnline: boolean;
+  /** Null for an online class, which has no physical location. */
+  latitude: number | null;
+  /** Null for an online class, which has no physical location. */
+  longitude: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -21,10 +24,11 @@ export interface CreateClassInput {
   weekdays: number[];
   startTime: string;
   endTime: string;
-  /** Resolved by the campus service; not accepted from the public API. */
-  latitude?: number;
-  /** Resolved by the campus service; not accepted from the public API. */
-  longitude?: number;
+  isOnline?: boolean;
+  /** Resolved by the campus service (null when online); not accepted from the public API. */
+  latitude?: number | null;
+  /** Resolved by the campus service (null when online); not accepted from the public API. */
+  longitude?: number | null;
 }
 
 export type UpdateClassInput = Partial<CreateClassInput>;
@@ -40,8 +44,10 @@ export interface ClassTimeRequest {
   endTime?: string;
 }
 
+/** `building` may be omitted for an online class; in-person classes require it. */
 export type CreateClassRequest =
-  Omit<CreateClassInput, 'startTime' | 'endTime' | 'latitude' | 'longitude'> & ClassTimeRequest;
+  Omit<CreateClassInput, 'building' | 'startTime' | 'endTime' | 'latitude' | 'longitude'> &
+  { building?: string } & ClassTimeRequest;
 
 export type UpdateClassRequest = Partial<CreateClassRequest>;
 

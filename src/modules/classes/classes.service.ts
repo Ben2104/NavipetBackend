@@ -72,11 +72,12 @@ function toCreateInput(request: CreateClassRequest): CreateClassInput {
   return {
     courseCode: request.courseCode,
     courseName: request.courseName,
-    building: request.building,
+    building: request.building ?? '',
     ...(request.room === undefined ? {} : { room: request.room }),
     weekdays: request.weekdays,
     startTime,
     endTime,
+    isOnline: request.isOnline ?? false,
   };
 }
 
@@ -87,8 +88,15 @@ function toUpdateInput(request: UpdateClassRequest): UpdateClassInput {
     ...(request.building === undefined ? {} : { building: request.building }),
     ...(request.room === undefined ? {} : { room: request.room }),
     ...(request.weekdays === undefined ? {} : { weekdays: request.weekdays }),
+    ...(request.isOnline === undefined ? {} : { isOnline: request.isOnline }),
     ...normalizeTimes(request),
   };
+}
+
+interface ClassLocation {
+  building: string;
+  latitude: number | null;
+  longitude: number | null;
 }
 
 function coordinatePair(building: CampusDestinationRecord): { latitude: number; longitude: number } | null {
@@ -191,20 +199,58 @@ export function createClassesService(gateway: SupabaseResources, externalPlaces:
     }
   }
 
+  /**
+   * An online class has no physical location: its `building` is stored as
+   * sent (possibly empty) and never resolved, and its coordinates are null.
+   * An in-person class needs a non-empty `building`, resolved to a canonical
+   * name plus coordinates.
+   */
+  async function resolveLocation(isOnline: boolean, buildingInput: string): Promise<ClassLocation> {
+    const building = buildingInput.trim();
+    if (isOnline) return { building, latitude: null, longitude: null };
+    if (building === '') {
+      throw new AppError({
+        code: ErrorCode.VALIDATION_ERROR,
+        statusCode: 422,
+        message: 'In-person classes require a `building`.',
+      });
+    }
+    const resolved = await resolveBuilding(gateway, externalPlaces, building);
+    return { building: resolved.name, ...resolved.coordinates };
+  }
+
+  /**
+   * The location fields a partial update writes, or undefined when it leaves
+   * the location alone. `stored` is required whenever the update does not
+   * itself set `isOnline: true`.
+   */
+  async function updatedLocation(
+    input: UpdateClassInput,
+    stored: ClassRecord | undefined,
+  ): Promise<Partial<ClassLocation> | undefined> {
+    if (input.isOnline === undefined && input.building === undefined) return undefined;
+    const isOnline = input.isOnline ?? stored?.isOnline ?? false;
+    if (isOnline) {
+      return {
+        ...(input.building === undefined ? {} : { building: input.building.trim() }),
+        latitude: null,
+        longitude: null,
+      };
+    }
+    // Staying in person with no new building: the stored location stands.
+    if (input.building === undefined && stored?.isOnline === false) return undefined;
+    return resolveLocation(false, input.building ?? stored?.building ?? '');
+  }
+
   return {
     list: (accessToken: string) => gateway.listClasses(accessToken),
     create: async (accessToken: string, userId: string, request: CreateClassRequest) => {
       const input = toCreateInput(request);
       validateTimeOrder(input.startTime, input.endTime);
       assertSchedulable(input, await gateway.listClasses(accessToken));
-      const building = await resolveBuilding(gateway, externalPlaces, input.building);
+      const location = await resolveLocation(input.isOnline === true, input.building);
       return persistOrExplainConflict(accessToken, input, undefined, () =>
-        gateway.createClass(accessToken, userId, {
-          ...input,
-          building: building.name,
-          latitude: building.coordinates.latitude,
-          longitude: building.coordinates.longitude,
-        }),
+        gateway.createClass(accessToken, userId, { ...input, ...location }),
       );
     },
     update: async (accessToken: string, classId: string, request: UpdateClassRequest) => {
@@ -212,11 +258,13 @@ export function createClassesService(gateway: SupabaseResources, externalPlaces:
       validateTimeOrder(input.startTime, input.endTime);
       const touchesSchedule = input.courseCode !== undefined || input.weekdays !== undefined ||
         input.startTime !== undefined || input.endTime !== undefined;
+      const touchesLocation = input.isOnline !== undefined || input.building !== undefined;
+      const needsStored = touchesSchedule || (touchesLocation && input.isOnline !== true);
+      const existing = needsStored ? await gateway.listClasses(accessToken) : [];
+      const stored = existing.find((record) => record.id === classId);
+      if (needsStored && stored === undefined) return null;
       let schedule: ClassSchedule | undefined;
-      if (touchesSchedule) {
-        const existing = await gateway.listClasses(accessToken);
-        const stored = existing.find((record) => record.id === classId);
-        if (stored === undefined) return null;
+      if (touchesSchedule && stored !== undefined) {
         schedule = {
           courseCode: input.courseCode ?? stored.courseCode,
           weekdays: input.weekdays ?? stored.weekdays,
@@ -226,14 +274,8 @@ export function createClassesService(gateway: SupabaseResources, externalPlaces:
         validateTimeOrder(schedule.startTime, schedule.endTime);
         assertSchedulable(schedule, existing, classId);
       }
-      const values = input.building === undefined
-        ? input
-        : await resolveBuilding(gateway, externalPlaces, input.building).then((building) => ({
-          ...input,
-          building: building.name,
-          latitude: building.coordinates.latitude,
-          longitude: building.coordinates.longitude,
-        }));
+      const location = await updatedLocation(input, stored);
+      const values = location === undefined ? input : { ...input, ...location };
       const write = () => gateway.updateClass(accessToken, classId, values);
       return schedule === undefined ? write() : persistOrExplainConflict(accessToken, schedule, classId, write);
     },
@@ -251,8 +293,9 @@ export function mapClassRow(row: Record<string, unknown>): ClassRecord {
     weekdays: row.weekdays as number[],
     startTime: row.start_time as string,
     endTime: row.end_time as string,
-    latitude: row.latitude as number,
-    longitude: row.longitude as number,
+    isOnline: row.is_online === true,
+    latitude: row.latitude as number | null,
+    longitude: row.longitude as number | null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };

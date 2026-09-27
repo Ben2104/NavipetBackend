@@ -5,7 +5,9 @@ import { ErrorResponseSchema } from '../../common/errors/error-response.schema.j
 // Status contract (all routes require a bearer token -> 401; 422 validation; 429; 502 storage):
 //   GET    /classes            200
 //   POST   /classes            201 | 404 building/address | 409 time conflict or duplicate
+//                              422 also when an in-person class has no building
 //   PATCH  /classes/:classId   200 | 404 class or building | 409 time conflict or duplicate
+//                              422 also when the result is an in-person class with no building
 //   DELETE /classes/:classId   204 | 404
 
 const UuidSchema = Type.String({
@@ -16,19 +18,26 @@ const ClassFieldsSchema = {
   courseCode: Type.String({ minLength: 1, maxLength: 30, example: 'CECS 491A' }),
   courseName: Type.String({ minLength: 1, maxLength: 100, example: 'Software Engineering Project' }),
   building: Type.String({
-    minLength: 1,
     maxLength: 100,
     example: 'VEC',
     description:
       'A CSULB building name or code (e.g. "VEC" or "Vivian Engineering Center") is resolved against the ' +
       'campus dataset. Anything else (a street address, another campus, an off-campus site) is forward-geocoded ' +
-      'with Mapbox instead. Either way the response echoes back a resolved display name plus latitude/longitude.',
+      'with Mapbox instead. Either way the stored class gets a resolved display name plus latitude/longitude. ' +
+      'Required for in-person classes. Optional for online classes, where it is stored as sent (possibly empty) ' +
+      'and never resolved.',
   }),
   room: Type.Optional(Type.String({ maxLength: 100, example: '3-3' })),
   weekdays: Type.Array(Type.Integer({ minimum: 1, maximum: 7 }), {
     maxItems: 7,
     example: [1, 3, 5],
     description: 'ISO weekdays the class meets: 1 = Monday ... 7 = Sunday.',
+  }),
+  isOnline: Type.Boolean({
+    example: false,
+    description:
+      'An online class has no physical location: no building is required and no coordinates are stored. ' +
+      'A synchronous online class still occupies its time slot for conflict checks.',
   }),
 };
 
@@ -64,7 +73,12 @@ const ClassTimeInputSchema = {
   })),
 };
 
-const ClassInputSchema = { ...ClassFieldsSchema, ...ClassTimeInputSchema };
+const ClassInputSchema = {
+  ...ClassFieldsSchema,
+  building: Type.Optional(ClassFieldsSchema.building),
+  isOnline: Type.Optional(ClassFieldsSchema.isOnline),
+  ...ClassTimeInputSchema,
+};
 
 const ClassResponseSchema = Type.Object(
   {
@@ -159,6 +173,8 @@ export const CreateClassRouteSchema = {
     'Send the time either as `time` (a CSULB range like "4-6:45PM") or as `startTime` + `endTime` ' +
     '(24-hour or AM/PM). Sending both forms, neither, or an unparseable or ambiguous time returns 422.\n\n' +
     'A request where the end time is not later than the start time returns 422.\n\n' +
+    'Set `isOnline: true` for an online class; `building` may then be omitted or empty.\n\n' +
+    'An in-person class with no `building` returns 422.\n\n' +
     scheduleConflictDescription,
   body: Type.Object(ClassInputSchema, { additionalProperties: false }),
   response: {
@@ -178,6 +194,8 @@ export const UpdateClassRouteSchema = {
     'Partial update: send only the fields being changed. An empty body returns 422.\n\n' +
     'Omitting `building` leaves the stored coordinates untouched.\n\n' +
     'Sending `building` re-resolves the coordinates the same way `POST /classes` does.\n\n' +
+    'Setting `isOnline: true` clears the coordinates. Setting `isOnline: false` resolves `building` ' +
+    '(the one sent, else the stored one); an empty building returns 422.\n\n' +
     '`time` replaces both `startTime` and `endTime`; it cannot be combined with either.\n\n' +
     'Changing `weekdays`, `time`, `startTime`, `endTime`, or `courseCode` re-checks the merged schedule: ' +
     'the end time must stay later than the start time (422), and the class must not conflict with any ' +
