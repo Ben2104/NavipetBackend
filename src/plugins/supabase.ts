@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   AuthApiError,
   createClient,
@@ -21,11 +23,16 @@ import type {
   ClassRecord,
   ClassesGateway,
 } from '../modules/classes/classes.types.js';
-import { randomUUID } from 'node:crypto';
+import {
+  committedAvatarPath,
+  isOwnAvatarPath,
+  pendingAvatarPath,
+  resolveAvatarPath,
+  type AvatarContentType,
+} from '../modules/profiles/profiles.avatar.js';
 import {
   AVATAR_BUCKET,
   AVATAR_SIGNED_URL_TTL_SECONDS,
-  DEFAULT_AVATAR_PATH,
   PENDING_AVATAR_MAX_AGE_MILLISECONDS,
 } from '../modules/profiles/profiles.types.js';
 import type {
@@ -154,16 +161,11 @@ export interface UserEmailLookupGateway {
 export interface ProfileGateway {
   getProfileByUserId(accessToken: string): Promise<ProfileRecord | null>;
   uploadProfileAvatar(
-    accessToken: string,
     userId: string,
-    contentType: string,
+    contentType: AvatarContentType,
     data: Buffer,
   ): Promise<ProfileAvatarUpload>;
-  discardProfileAvatar(
-    accessToken: string,
-    userId: string,
-    uploadId: string,
-  ): Promise<boolean>;
+  discardProfileAvatar(userId: string, uploadId: string): Promise<boolean>;
   updateProfile(
     accessToken: string,
     userId: string,
@@ -241,15 +243,42 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
     rank?: number;
   }
 
-  async function avatarUrl(path: string): Promise<string> {
+  // The avatars bucket is backend-managed: it grants `authenticated` no
+  // storage.objects policies, because the Flutter client ships the anon key
+  // and must not be able to write around the size and type checks in the
+  // upload route. Every avatar object operation therefore uses the service
+  // role, always on a path built from the verified user id.
+  function avatarStorage() {
     if (adminClient === null) {
-      throw new Error('Supabase service role is required for avatar URLs');
+      throw new AppError({
+        code: ErrorCode.UPSTREAM_ERROR,
+        statusCode: 503,
+        message: 'Avatar storage unavailable',
+      });
     }
-    const { data, error } = await adminClient.storage
-      .from(AVATAR_BUCKET)
-      .createSignedUrl(path, AVATAR_SIGNED_URL_TTL_SECONDS);
+    return adminClient.storage.from(AVATAR_BUCKET);
+  }
+
+  async function signAvatar(path: string): Promise<string> {
+    const { data, error } = await avatarStorage().createSignedUrl(
+      path,
+      AVATAR_SIGNED_URL_TTL_SECONDS,
+    );
     if (error !== null) throw error;
     return data.signedUrl;
+  }
+
+  // A profile read must not fail because its avatar cannot be signed (no
+  // service role, missing object); the client shows a placeholder instead.
+  async function profileAvatarUrl(
+    userId: string,
+    storedPath: string | null,
+  ): Promise<string | null> {
+    try {
+      return await signAvatar(resolveAvatarPath(userId, storedPath));
+    } catch {
+      return null;
+    }
   }
 
   const campusColumns =
@@ -376,7 +405,7 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
     async getProfileByUserId(accessToken): Promise<ProfileRecord | null> {
       const { data, error } = await forAccessToken(accessToken)
         .from('profiles')
-        .select('display_name,email,role,avatar_path')
+        .select('id,display_name,email,role,avatar_path')
         .maybeSingle();
       if (error !== null) throw error;
       if (data === null) return null;
@@ -384,77 +413,96 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
         displayName: data.display_name as string,
         email: data.email as string | null,
         role: data.role as ProfileRecord['role'],
-        avatarUrl: await avatarUrl((data.avatar_path as string | null) ?? DEFAULT_AVATAR_PATH),
+        avatarUrl: await profileAvatarUrl(
+          data.id as string,
+          data.avatar_path as string | null,
+        ),
       };
     },
     async updateProfile(accessToken, userId, input): Promise<ProfileRecord | null> {
-      let avatarPath: string | undefined;
+      const client = forAccessToken(accessToken);
+      let avatar:
+        | { pendingPath: string; committedPath: string; previousPath: string | null }
+        | undefined;
       if (input.avatarUploadId !== undefined) {
-        if (adminClient === null) {
-          throw new Error('Supabase service role is required to commit avatars');
+        const storage = avatarStorage();
+        const pendingPath = pendingAvatarPath(userId, input.avatarUploadId);
+        const pending = await storage.exists(pendingPath);
+        if (!pending.data) {
+          throw new AppError({
+            code: ErrorCode.NOT_FOUND,
+            statusCode: 404,
+            message: 'Avatar upload not found.',
+          });
         }
-        if (!/^[0-9a-f-]{36}$/i.test(input.avatarUploadId)) {
-          throw new Error('Invalid avatar path');
-        }
-        const pendingPath = `${userId}/pending/${input.avatarUploadId}`;
-        avatarPath = `${userId}/profile`;
-        const storage = adminClient.storage.from(AVATAR_BUCKET);
-        const download = await storage.download(pendingPath);
-        if (download.error !== null) throw download.error;
-        const upload = await storage.upload(avatarPath, download.data, {
-          upsert: true,
-          contentType: download.data.type || 'application/octet-stream',
-        });
-        if (upload.error !== null) throw upload.error;
-        const remove = await storage.remove([pendingPath]);
-        if (remove.error !== null) throw remove.error;
+        const current = await client
+          .from('profiles')
+          .select('avatar_path')
+          .eq('id', userId)
+          .maybeSingle();
+        if (current.error !== null) throw current.error;
+        // Each commit gets its own object, so the previous avatar stays intact
+        // until the profile row points at the new one.
+        const committedPath = committedAvatarPath(userId, input.avatarUploadId);
+        const moved = await storage.move(pendingPath, committedPath);
+        if (moved.error !== null) throw moved.error;
+        avatar = {
+          pendingPath,
+          committedPath,
+          previousPath: current.data === null ? null : (current.data.avatar_path as string | null),
+        };
       }
       const values = {
         ...(input.displayName === undefined ? {} : { display_name: input.displayName }),
         ...(input.email === undefined ? {} : { email: input.email }),
         ...(input.role === undefined ? {} : { role: input.role }),
-        ...(avatarPath === undefined ? {} : { avatar_path: avatarPath }),
+        ...(avatar === undefined ? {} : { avatar_path: avatar.committedPath }),
       };
-      const { data, error } = await forAccessToken(accessToken)
+      const { data, error } = await client
         .from('profiles')
         .update(values)
         .eq('id', userId)
         .select('display_name,email,role,avatar_path')
         .maybeSingle();
+      if (avatar !== undefined) {
+        const storage = avatarStorage();
+        if (error !== null || data === null) {
+          // Put the upload back so the client can retry or discard it.
+          await storage.move(avatar.committedPath, avatar.pendingPath);
+        } else if (
+          avatar.previousPath !== null &&
+          avatar.previousPath !== avatar.committedPath &&
+          isOwnAvatarPath(userId, avatar.previousPath)
+        ) {
+          // Best effort: an orphaned old avatar is harmless.
+          await storage.remove([avatar.previousPath]);
+        }
+      }
       if (error !== null) throw error;
       if (data === null) return null;
       return {
         displayName: data.display_name as string,
         email: data.email as string | null,
         role: data.role as ProfileRecord['role'],
-        avatarUrl: await avatarUrl((data.avatar_path as string | null) ?? DEFAULT_AVATAR_PATH),
+        avatarUrl: await profileAvatarUrl(userId, data.avatar_path as string | null),
       };
     },
-    async uploadProfileAvatar(_accessToken, userId, contentType, data) {
-      if (adminClient === null) {
-        throw new Error('Supabase service role is required for avatar uploads');
-      }
+    async uploadProfileAvatar(userId, contentType, data) {
       const uploadId = randomUUID();
-      const path = `${userId}/pending/${uploadId}`;
-      const { error } = await adminClient.storage.from(AVATAR_BUCKET).upload(path, data, {
+      const path = pendingAvatarPath(userId, uploadId);
+      const { error } = await avatarStorage().upload(path, data, {
         contentType,
         upsert: false,
       });
       if (error !== null) throw error;
-      return { uploadId, avatarUrl: await avatarUrl(path) };
+      return { uploadId, avatarUrl: await signAvatar(path) };
     },
-    async discardProfileAvatar(_accessToken, userId, uploadId) {
-      if (adminClient === null) {
-        throw new Error('Supabase service role is required for avatar deletion');
-      }
-      if (!/^[0-9a-f-]{36}$/i.test(uploadId)) return false;
-      const path = `${userId}/pending/${uploadId}`;
-      const storage = adminClient.storage.from(AVATAR_BUCKET);
-      const { data } = await storage.list(`${userId}/pending`, { search: uploadId, limit: 1 });
-      if ((data ?? []).length === 0) return false;
-      const { error } = await storage.remove([path]);
+    async discardProfileAvatar(userId, uploadId) {
+      const { data, error } = await avatarStorage().remove([
+        pendingAvatarPath(userId, uploadId),
+      ]);
       if (error !== null) throw error;
-      return true;
+      return data.length > 0;
     },
     async cleanupPendingProfileAvatars() {
       if (adminClient === null) return 0;

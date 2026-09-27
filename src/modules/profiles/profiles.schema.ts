@@ -13,7 +13,11 @@ export const GetProfileResponseSchema = Type.Object(
       displayName: Type.String(),
       email: Type.Union([Type.String(), Type.Null()]),
       role: Type.Union([ProfileRoleSchema, Type.Null()]),
-      avatarUrl: Type.String({ format: 'uri' }),
+      avatarUrl: Type.Union([Type.String({ format: 'uri' }), Type.Null()], {
+        description:
+          'Temporary signed avatar URL, valid for about one hour. `null` when ' +
+          'the avatar cannot be served; show a local placeholder instead.',
+      }),
     }),
   },
   {
@@ -27,8 +31,9 @@ export const GetProfileRouteSchema = {
   summary: 'Get the authenticated user profile',
   description:
     'Returns the display name, email, and role for the currently logged-in ' +
-    'user. Requires `Authorization: Bearer <access_token>`. `avatarUrl` is a ' +
-    'temporary signed URL that expires after approximately one hour.',
+    'user. Requires `Authorization: Bearer <access_token>`.\n\n' +
+    '`avatarUrl` is a temporary signed URL that expires after approximately ' +
+    'one hour, or `null` when no avatar can be served.',
   security: [{ bearerAuth: [] }],
   response: {
     200: GetProfileResponseSchema,
@@ -68,7 +73,7 @@ export const UploadAvatarRouteSchema = {
     'Uploads one JPEG, PNG, or WebP image to temporary Storage. The returned ' +
     '`uploadId` must be included in PATCH /profiles/me to permanently save ' +
     'the avatar. If the user discards changes, call the DELETE endpoint instead. ' +
-    'Maximum size: 5 MB. The multipart field should be named `avatar`. The ' +
+    'Maximum size: 5 MB. The multipart field must be named `avatar`. The ' +
     'returned preview URL is temporary and expires after approximately one hour.',
   security: [{ bearerAuth: [] }],
   consumes: ['multipart/form-data'],
@@ -81,11 +86,18 @@ export const UploadAvatarRouteSchema = {
   },
   response: {
     200: UploadAvatarResponseSchema,
-    400: ErrorResponseSchema('An image file is required.'),
+    400: ErrorResponseSchema(
+      'The multipart body is malformed, has no file, or does not use the ' +
+      '`avatar` field.',
+    ),
     401: ErrorResponseSchema('Access token is missing, invalid, or expired.'),
-    413: ErrorResponseSchema('The image is too large.'),
-    415: ErrorResponseSchema('The image type is unsupported.'),
+    413: ErrorResponseSchema('The image is larger than 5 MB.'),
+    415: ErrorResponseSchema(
+      'The request is not multipart/form-data, or the file is not a JPEG, ' +
+      'PNG, or WebP image.',
+    ),
     502: ErrorResponseSchema('Profile storage is unavailable.'),
+    503: ErrorResponseSchema('Avatar storage is not configured on the server.'),
   },
 };
 
@@ -101,7 +113,9 @@ export const DeleteAvatarRouteSchema = {
     204: { description: 'Temporary avatar deleted.' },
     401: ErrorResponseSchema('Access token is missing, invalid, or expired.'),
     404: ErrorResponseSchema('Temporary avatar not found.'),
+    422: ErrorResponseSchema('The uploadId is not a UUID.'),
     502: ErrorResponseSchema('Profile storage is unavailable.'),
+    503: ErrorResponseSchema('Avatar storage is not configured on the server.'),
   },
 };
 
@@ -122,8 +136,12 @@ export const UpdateProfileRouteSchema = {
     200: GetProfileResponseSchema,
     400: ErrorResponseSchema('Malformed JSON body.'),
     401: ErrorResponseSchema('Access token is missing, invalid, or expired.'),
-    404: ErrorResponseSchema('The authenticated profile does not exist.'),
-    422: ErrorResponseSchema('The display name is invalid.'),
+    404: ErrorResponseSchema(
+      'The authenticated profile, or the avatar upload named by ' +
+      '`avatarUploadId`, does not exist.',
+    ),
+    422: ErrorResponseSchema('The request body failed validation.'),
     502: ErrorResponseSchema('Profile storage is unavailable.'),
+    503: ErrorResponseSchema('Avatar storage is not configured on the server.'),
   },
 };
