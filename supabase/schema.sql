@@ -81,15 +81,22 @@ create table if not exists public.classes (
   user_id uuid not null references auth.users(id) on delete cascade,
   course_code text not null check (char_length(course_code) between 1 and 30),
   course_name text not null check (char_length(course_name) between 1 and 100),
-  building text not null check (char_length(building) between 1 and 100),
+  building text not null,
   room text not null default '',
   weekdays smallint[] not null default '{}' check (weekdays <@ array[1,2,3,4,5,6,7]::smallint[]),
   start_time time not null default '09:00',
   end_time time not null default '10:00' check (end_time > start_time),
-  latitude double precision not null,
-  longitude double precision not null,
+  -- Online classes have no physical location: building may be empty and
+  -- coordinates are null. In-person classes require both.
+  is_online boolean not null default false,
+  latitude double precision,
+  longitude double precision,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint classes_building_check
+    check (char_length(building) <= 100 and (is_online or char_length(building) >= 1)),
+  constraint classes_in_person_coordinates_check
+    check (is_online or (latitude is not null and longitude is not null))
 );
 
 create index if not exists classes_user_id_idx on public.classes(user_id);
@@ -248,7 +255,7 @@ create table if not exists public.task_completions (
   user_id uuid not null references auth.users(id) on delete cascade,
   class_id uuid not null references public.classes(id) on delete cascade,
   task_date date not null,
-  task_kind text not null check (task_kind in ('attend', 'prepare')),
+  task_kind text not null check (task_kind in ('attend', 'prepare', 'attend_online')),
   completed_at timestamptz not null default now(),
   primary key (user_id, class_id, task_date, task_kind)
 );
