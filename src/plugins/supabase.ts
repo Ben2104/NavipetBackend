@@ -378,7 +378,7 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
     async listClasses(accessToken): Promise<ClassRecord[]> {
       const { data, error } = await forAccessToken(accessToken)
         .from('classes')
-        .select('id,course_code,course_name,building,room,weekdays,start_time,end_time,latitude,longitude,created_at,updated_at')
+        .select('id,course_code,course_name,building,room,weekdays,start_time,end_time,is_online,latitude,longitude,created_at,updated_at')
         .order('created_at', { ascending: true });
       if (error !== null) throw error;
       return data.map(mapClassRow);
@@ -395,10 +395,11 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
           weekdays: input.weekdays,
           start_time: input.startTime,
           end_time: input.endTime,
+          is_online: input.isOnline ?? false,
           latitude: input.latitude,
           longitude: input.longitude,
         })
-        .select('id,course_code,course_name,building,room,weekdays,start_time,end_time,latitude,longitude,created_at,updated_at')
+        .select('id,course_code,course_name,building,room,weekdays,start_time,end_time,is_online,latitude,longitude,created_at,updated_at')
         .single();
       if (error !== null) throw error;
       return mapClassRow(data);
@@ -412,6 +413,7 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
       if (input.weekdays !== undefined) values.weekdays = input.weekdays;
       if (input.startTime !== undefined) values.start_time = input.startTime;
       if (input.endTime !== undefined) values.end_time = input.endTime;
+      if (input.isOnline !== undefined) values.is_online = input.isOnline;
       if (input.latitude !== undefined) values.latitude = input.latitude;
       if (input.longitude !== undefined) values.longitude = input.longitude;
       if (Object.keys(values).length === 0) return null;
@@ -419,7 +421,7 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
         .from('classes')
         .update(values)
         .eq('id', classId)
-        .select('id,course_code,course_name,building,room,weekdays,start_time,end_time,latitude,longitude,created_at,updated_at')
+        .select('id,course_code,course_name,building,room,weekdays,start_time,end_time,is_online,latitude,longitude,created_at,updated_at')
         .maybeSingle();
       if (error !== null) throw error;
       return data === null ? null : mapClassRow(data);

@@ -58,6 +58,7 @@ function classRecord(overrides: Partial<ClassRecord> = {}): ClassRecord {
     weekdays: [1, 3, 5],
     startTime: '11:00',
     endTime: '12:15',
+    isOnline: false,
     latitude: 33.783,
     longitude: -118.112,
     createdAt: '2026-01-01T00:00:00.000Z',
