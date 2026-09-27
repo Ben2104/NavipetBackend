@@ -66,6 +66,15 @@ describe('findClassConflicts', () => {
     ]);
   });
 
+  it('labels an online class location as Online', () => {
+    const online = existing({ isOnline: true, building: '', room: '', latitude: null, longitude: null });
+    const [first] = findClassConflicts(candidate(), [online]);
+    expect(first?.location).toBe('Online');
+
+    const withRoom = existing({ isOnline: true, building: '', room: 'Zoom', latitude: null, longitude: null });
+    expect(findClassConflicts(candidate(), [withRoom])[0]?.location).toBe('Online (Zoom)');
+  });
+
   it('flags a partial overlap', () => {
     const conflicts = findClassConflicts(candidate({ startTime: '09:30', endTime: '10:30' }), [existing()]);
     expect(conflicts).toHaveLength(2);

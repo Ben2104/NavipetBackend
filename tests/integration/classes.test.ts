@@ -743,4 +743,306 @@ describe('classes routes', () => {
       expect(response.json()).toMatchObject({ classes: [{ startTime: '16:00:00', endTime: '18:45:00' }] });
     });
   });
+
+  describe('online classes', () => {
+    const auth = { authorization: 'Bearer valid-access-token' };
+    const classUrl = `/classes/${classRecord().id}`;
+    const withoutBuilding = {
+      courseCode: createBody.courseCode,
+      courseName: createBody.courseName,
+      room: createBody.room,
+      weekdays: createBody.weekdays,
+      startTime: createBody.startTime,
+      endTime: createBody.endTime,
+    };
+    const onlineRecord = (overrides: Partial<ClassRecord> = {}) =>
+      classRecord({ isOnline: true, building: '', room: '', latitude: null, longitude: null, ...overrides });
+
+    it('creates an online class without a building, skipping resolution', async () => {
+      const createClass = vi.fn().mockResolvedValue(onlineRecord());
+      const findBuildingByCode = vi.fn();
+      const searchExternalPlaces = vi.fn();
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ createClass, findBuildingByCode }),
+          externalPlaces: { searchExternalPlaces },
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const responses = await Promise.all([
+        app.inject({ method: 'POST', url: '/classes', headers: auth, payload: { ...withoutBuilding, isOnline: true } }),
+        app.inject({ method: 'POST', url: '/classes', headers: auth, payload: { ...createBody, building: '', isOnline: true } }),
+      ]);
+
+      for (const response of responses) {
+        expect(response.statusCode).toBe(201);
+        expect(response.json()).toMatchObject({ class: { isOnline: true, building: '' } });
+      }
+      expect(findBuildingByCode).not.toHaveBeenCalled();
+      expect(searchExternalPlaces).not.toHaveBeenCalled();
+      expect(createClass).toHaveBeenCalledWith(
+        'valid-access-token',
+        verifiedUser.id,
+        expect.objectContaining({ isOnline: true, building: '', latitude: null, longitude: null }),
+      );
+    });
+
+    it('stores an online class building as sent, without resolving it', async () => {
+      const createClass = vi.fn().mockResolvedValue(onlineRecord({ building: 'Zoom' }));
+      const findBuildingByCode = vi.fn();
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ createClass, findBuildingByCode }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({
+        method: 'POST', url: '/classes', headers: auth, payload: { ...createBody, building: ' Zoom ', isOnline: true },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(findBuildingByCode).not.toHaveBeenCalled();
+      expect(createClass).toHaveBeenCalledWith(
+        'valid-access-token',
+        verifiedUser.id,
+        expect.objectContaining({ building: 'Zoom', latitude: null, longitude: null }),
+      );
+    });
+
+    it('rejects an in-person class without a building with 422', async () => {
+      const createClass = vi.fn();
+      app = await buildTestApp(
+        {},
+        { supabaseResources: resources({ createClass }), externalPlaces: noExternal(), authVerifier: verifiedVerifier() },
+      );
+
+      const responses = await Promise.all([
+        app.inject({ method: 'POST', url: '/classes', headers: auth, payload: withoutBuilding }),
+        app.inject({ method: 'POST', url: '/classes', headers: auth, payload: { ...createBody, building: '   ' } }),
+        app.inject({ method: 'POST', url: '/classes', headers: auth, payload: { ...createBody, isOnline: false, building: '' } }),
+      ]);
+
+      for (const response of responses) {
+        expect(response.statusCode).toBe(422);
+        expect(response.json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } });
+      }
+      expect(createClass).not.toHaveBeenCalled();
+    });
+
+    it('defaults isOnline to false on create', async () => {
+      const createClass = vi.fn().mockResolvedValue(classRecord());
+      const findBuildingByCode = vi.fn().mockResolvedValue(building({ latitude: 33.783, longitude: -118.112 }));
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ createClass, findBuildingByCode }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({ method: 'POST', url: '/classes', headers: auth, payload: createBody });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({ class: { isOnline: false } });
+      expect(createClass).toHaveBeenCalledWith(
+        'valid-access-token',
+        verifiedUser.id,
+        expect.objectContaining({ isOnline: false }),
+      );
+    });
+
+    it('lists isOnline for every class', async () => {
+      const listClasses = vi.fn().mockResolvedValue([
+        classRecord(),
+        onlineRecord({ id: '00000000-0000-4000-8000-0000000000c2' }),
+      ]);
+      app = await buildTestApp(
+        {},
+        { supabaseResources: resources({ listClasses }), externalPlaces: noExternal(), authVerifier: verifiedVerifier() },
+      );
+
+      const response = await app.inject({ method: 'GET', url: '/classes', headers: auth });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ classes: [{ isOnline: false }, { isOnline: true, building: '' }] });
+    });
+
+    it('clears coordinates when PATCH switches a class online, without resolving or listing', async () => {
+      const updateClass = vi.fn().mockResolvedValue(onlineRecord({ building: 'Vivian Engineering Center' }));
+      const listClasses = vi.fn();
+      const findBuildingByCode = vi.fn();
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ updateClass, listClasses, findBuildingByCode }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({ method: 'PATCH', url: classUrl, headers: auth, payload: { isOnline: true } });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ class: { isOnline: true } });
+      expect(listClasses).not.toHaveBeenCalled();
+      expect(findBuildingByCode).not.toHaveBeenCalled();
+      expect(updateClass).toHaveBeenCalledWith('valid-access-token', classRecord().id, {
+        isOnline: true,
+        latitude: null,
+        longitude: null,
+      });
+    });
+
+    it('resolves the stored building when PATCH switches an online class in person', async () => {
+      const updateClass = vi.fn().mockResolvedValue(classRecord());
+      const listClasses = vi.fn().mockResolvedValue([onlineRecord({ building: 'VEC' })]);
+      const findBuildingByCode = vi.fn().mockResolvedValue(building({ latitude: 33.783, longitude: -118.112 }));
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ updateClass, listClasses, findBuildingByCode }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({ method: 'PATCH', url: classUrl, headers: auth, payload: { isOnline: false } });
+
+      expect(response.statusCode).toBe(200);
+      expect(findBuildingByCode).toHaveBeenCalledWith('VEC');
+      expect(updateClass).toHaveBeenCalledWith('valid-access-token', classRecord().id, {
+        isOnline: false,
+        building: 'Vivian Engineering Center',
+        latitude: 33.783,
+        longitude: -118.112,
+      });
+    });
+
+    it('prefers the sent building when PATCH switches an online class in person', async () => {
+      const updateClass = vi.fn().mockResolvedValue(classRecord());
+      const listClasses = vi.fn().mockResolvedValue([onlineRecord()]);
+      const findBuildingByCode = vi.fn().mockResolvedValue(building({ latitude: 33.783, longitude: -118.112 }));
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ updateClass, listClasses, findBuildingByCode }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({
+        method: 'PATCH', url: classUrl, headers: auth, payload: { isOnline: false, building: 'vec' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(findBuildingByCode).toHaveBeenCalledWith('VEC');
+      expect(updateClass).toHaveBeenCalledWith(
+        'valid-access-token',
+        classRecord().id,
+        expect.objectContaining({ isOnline: false, building: 'Vivian Engineering Center', latitude: 33.783 }),
+      );
+    });
+
+    it('rejects switching an online class in person when no building is known', async () => {
+      const updateClass = vi.fn();
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ updateClass, listClasses: vi.fn().mockResolvedValue([onlineRecord()]) }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({ method: 'PATCH', url: classUrl, headers: auth, payload: { isOnline: false } });
+
+      expect(response.statusCode).toBe(422);
+      expect(updateClass).not.toHaveBeenCalled();
+    });
+
+    it('stores a new building on an online class without resolving it', async () => {
+      const updateClass = vi.fn().mockResolvedValue(onlineRecord({ building: 'Zoom' }));
+      const findBuildingByCode = vi.fn();
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({
+            updateClass,
+            findBuildingByCode,
+            listClasses: vi.fn().mockResolvedValue([onlineRecord()]),
+          }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({ method: 'PATCH', url: classUrl, headers: auth, payload: { building: 'Zoom' } });
+
+      expect(response.statusCode).toBe(200);
+      expect(findBuildingByCode).not.toHaveBeenCalled();
+      expect(updateClass).toHaveBeenCalledWith('valid-access-token', classRecord().id, {
+        building: 'Zoom',
+        latitude: null,
+        longitude: null,
+      });
+    });
+
+    it('rejects clearing the building of an in-person class', async () => {
+      const updateClass = vi.fn();
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({ updateClass, listClasses: vi.fn().mockResolvedValue([classRecord()]) }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({ method: 'PATCH', url: classUrl, headers: auth, payload: { building: '' } });
+
+      expect(response.statusCode).toBe(422);
+      expect(updateClass).not.toHaveBeenCalled();
+    });
+
+    it('leaves the location alone when PATCH keeps an in-person class in person', async () => {
+      const updateClass = vi.fn().mockResolvedValue(classRecord());
+      const findBuildingByCode = vi.fn();
+      app = await buildTestApp(
+        {},
+        {
+          supabaseResources: resources({
+            updateClass,
+            findBuildingByCode,
+            listClasses: vi.fn().mockResolvedValue([classRecord()]),
+          }),
+          externalPlaces: noExternal(),
+          authVerifier: verifiedVerifier(),
+        },
+      );
+
+      const response = await app.inject({ method: 'PATCH', url: classUrl, headers: auth, payload: { isOnline: false } });
+
+      expect(response.statusCode).toBe(200);
+      expect(findBuildingByCode).not.toHaveBeenCalled();
+      expect(updateClass).toHaveBeenCalledWith('valid-access-token', classRecord().id, { isOnline: false });
+    });
+
+    it('returns 404 when switching an unknown class in person', async () => {
+      app = await buildTestApp(
+        {},
+        { supabaseResources: resources(), externalPlaces: noExternal(), authVerifier: verifiedVerifier() },
+      );
+
+      const response = await app.inject({ method: 'PATCH', url: classUrl, headers: auth, payload: { isOnline: false } });
+
+      expect(response.statusCode).toBe(404);
+    });
+  });
 });
