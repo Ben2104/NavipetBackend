@@ -1,4 +1,4 @@
--- Profile avatars are stored in the public avatars bucket. The profiles table
+-- Profile avatars are stored in the private avatars bucket. The profiles table
 -- stores only the object path, never the image bytes.
 alter table public.profiles
   add column if not exists avatar_path text not null default 'defaults/avatar.webp';
