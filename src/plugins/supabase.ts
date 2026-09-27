@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   AuthApiError,
   createClient,
@@ -21,7 +23,20 @@ import type {
   ClassRecord,
   ClassesGateway,
 } from '../modules/classes/classes.types.js';
+import {
+  committedAvatarPath,
+  isOwnAvatarPath,
+  pendingAvatarPath,
+  resolveAvatarPath,
+  type AvatarContentType,
+} from '../modules/profiles/profiles.avatar.js';
+import {
+  AVATAR_BUCKET,
+  AVATAR_SIGNED_URL_TTL_SECONDS,
+  PENDING_AVATAR_MAX_AGE_MILLISECONDS,
+} from '../modules/profiles/profiles.types.js';
 import type {
+  ProfileAvatarUpload,
   ProfileRecord,
   UpdateProfileInput,
 } from '../modules/profiles/profiles.types.js';
@@ -145,11 +160,18 @@ export interface UserEmailLookupGateway {
 
 export interface ProfileGateway {
   getProfileByUserId(accessToken: string): Promise<ProfileRecord | null>;
+  uploadProfileAvatar(
+    userId: string,
+    contentType: AvatarContentType,
+    data: Buffer,
+  ): Promise<ProfileAvatarUpload>;
+  discardProfileAvatar(userId: string, uploadId: string): Promise<boolean>;
   updateProfile(
     accessToken: string,
     userId: string,
     input: UpdateProfileInput,
   ): Promise<ProfileRecord | null>;
+  cleanupPendingProfileAvatars(): Promise<number>;
 }
 
 export interface RecentSearch {
@@ -219,6 +241,44 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
     active?: boolean;
     searchable?: boolean;
     rank?: number;
+  }
+
+  // The avatars bucket is backend-managed: it grants `authenticated` no
+  // storage.objects policies, because the Flutter client ships the anon key
+  // and must not be able to write around the size and type checks in the
+  // upload route. Every avatar object operation therefore uses the service
+  // role, always on a path built from the verified user id.
+  function avatarStorage() {
+    if (adminClient === null) {
+      throw new AppError({
+        code: ErrorCode.UPSTREAM_ERROR,
+        statusCode: 503,
+        message: 'Avatar storage unavailable',
+      });
+    }
+    return adminClient.storage.from(AVATAR_BUCKET);
+  }
+
+  async function signAvatar(path: string): Promise<string> {
+    const { data, error } = await avatarStorage().createSignedUrl(
+      path,
+      AVATAR_SIGNED_URL_TTL_SECONDS,
+    );
+    if (error !== null) throw error;
+    return data.signedUrl;
+  }
+
+  // A profile read must not fail because its avatar cannot be signed (no
+  // service role, missing object); the client shows a placeholder instead.
+  async function profileAvatarUrl(
+    userId: string,
+    storedPath: string | null,
+  ): Promise<string | null> {
+    try {
+      return await signAvatar(resolveAvatarPath(userId, storedPath));
+    } catch {
+      return null;
+    }
   }
 
   const campusColumns =
@@ -345,7 +405,7 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
     async getProfileByUserId(accessToken): Promise<ProfileRecord | null> {
       const { data, error } = await forAccessToken(accessToken)
         .from('profiles')
-        .select('display_name,email,role')
+        .select('id,display_name,email,role,avatar_path')
         .maybeSingle();
       if (error !== null) throw error;
       if (data === null) return null;
@@ -353,27 +413,138 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
         displayName: data.display_name as string,
         email: data.email as string | null,
         role: data.role as ProfileRecord['role'],
+        avatarUrl: await profileAvatarUrl(
+          data.id as string,
+          data.avatar_path as string | null,
+        ),
       };
     },
     async updateProfile(accessToken, userId, input): Promise<ProfileRecord | null> {
+      const client = forAccessToken(accessToken);
+      let avatar:
+        | { pendingPath: string; committedPath: string; previousPath: string | null }
+        | undefined;
+      if (input.avatarUploadId !== undefined) {
+        const storage = avatarStorage();
+        const pendingPath = pendingAvatarPath(userId, input.avatarUploadId);
+        const pending = await storage.exists(pendingPath);
+        if (!pending.data) {
+          throw new AppError({
+            code: ErrorCode.NOT_FOUND,
+            statusCode: 404,
+            message: 'Avatar upload not found.',
+          });
+        }
+        const current = await client
+          .from('profiles')
+          .select('avatar_path')
+          .eq('id', userId)
+          .maybeSingle();
+        if (current.error !== null) throw current.error;
+        // Each commit gets its own object, so the previous avatar stays intact
+        // until the profile row points at the new one.
+        const committedPath = committedAvatarPath(userId, input.avatarUploadId);
+        const moved = await storage.move(pendingPath, committedPath);
+        if (moved.error !== null) throw moved.error;
+        avatar = {
+          pendingPath,
+          committedPath,
+          previousPath: current.data === null ? null : (current.data.avatar_path as string | null),
+        };
+      }
       const values = {
         ...(input.displayName === undefined ? {} : { display_name: input.displayName }),
         ...(input.email === undefined ? {} : { email: input.email }),
         ...(input.role === undefined ? {} : { role: input.role }),
+        ...(avatar === undefined ? {} : { avatar_path: avatar.committedPath }),
       };
-      const { data, error } = await forAccessToken(accessToken)
+      const { data, error } = await client
         .from('profiles')
         .update(values)
         .eq('id', userId)
-        .select('display_name,email,role')
+        .select('display_name,email,role,avatar_path')
         .maybeSingle();
+      if (avatar !== undefined) {
+        const storage = avatarStorage();
+        if (error !== null || data === null) {
+          // Put the upload back so the client can retry or discard it.
+          await storage.move(avatar.committedPath, avatar.pendingPath);
+        } else if (
+          avatar.previousPath !== null &&
+          avatar.previousPath !== avatar.committedPath &&
+          isOwnAvatarPath(userId, avatar.previousPath)
+        ) {
+          // Best effort: an orphaned old avatar is harmless.
+          await storage.remove([avatar.previousPath]);
+        }
+      }
       if (error !== null) throw error;
       if (data === null) return null;
       return {
         displayName: data.display_name as string,
         email: data.email as string | null,
         role: data.role as ProfileRecord['role'],
+        avatarUrl: await profileAvatarUrl(userId, data.avatar_path as string | null),
       };
+    },
+    async uploadProfileAvatar(userId, contentType, data) {
+      const uploadId = randomUUID();
+      const path = pendingAvatarPath(userId, uploadId);
+      const { error } = await avatarStorage().upload(path, data, {
+        contentType,
+        upsert: false,
+      });
+      if (error !== null) throw error;
+      return { uploadId, avatarUrl: await signAvatar(path) };
+    },
+    async discardProfileAvatar(userId, uploadId) {
+      const { data, error } = await avatarStorage().remove([
+        pendingAvatarPath(userId, uploadId),
+      ]);
+      if (error !== null) throw error;
+      return data.length > 0;
+    },
+    async cleanupPendingProfileAvatars() {
+      if (adminClient === null) return 0;
+      const storage = adminClient.storage.from(AVATAR_BUCKET);
+      const cutoff = Date.now() - PENDING_AVATAR_MAX_AGE_MILLISECONDS;
+      let deletedCount = 0;
+      for (let offset = 0; ; offset += 1_000) {
+        const { data: userEntries, error: userError } = await storage.list('', {
+          limit: 1_000,
+          offset,
+        });
+        if (userError !== null) throw userError;
+        if (userEntries.length === 0) break;
+        for (const userEntry of userEntries) {
+          if (
+            typeof userEntry.name !== 'string' ||
+            !/^[0-9a-f-]{36}$/i.test(userEntry.name)
+          ) continue;
+          const { data: pendingEntries, error: pendingError } = await storage.list(
+            `${userEntry.name}/pending`,
+            { limit: 1_000 },
+          );
+          if (pendingError !== null) throw pendingError;
+          const stalePaths: string[] = [];
+          for (const entry of pendingEntries) {
+            const timestamp = entry.created_at ?? entry.updated_at;
+            if (
+              typeof entry.name === 'string' &&
+              typeof timestamp === 'string' &&
+              Date.parse(timestamp) < cutoff
+            ) {
+              stalePaths.push(`${userEntry.name}/pending/${entry.name}`);
+            }
+          }
+          if (stalePaths.length === 0) continue;
+          const { error: removeError } = await storage.remove(stalePaths);
+          if (removeError !== null) throw removeError;
+          deletedCount += stalePaths.length;
+        }
+        if (userEntries.length < 1_000) break;
+      }
+      return deletedCount;
     },
     async listClasses(accessToken): Promise<ClassRecord[]> {
       const { data, error } = await forAccessToken(accessToken)

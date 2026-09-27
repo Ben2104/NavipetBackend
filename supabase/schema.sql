@@ -7,6 +7,7 @@ create table if not exists public.profiles (
     check (char_length(display_name) between 1 and 80),
   email text,
   role text check (role in ('student', 'professor')),
+  avatar_path text not null default 'defaults/avatar.webp',
   avatar_color bigint not null default 4294946816,
   gems integer not null default 0 check (gems >= 0),
   level integer not null default 1 check (level >= 1),
@@ -15,6 +16,27 @@ create table if not exists public.profiles (
 );
 
 alter table public.profiles enable row level security;
+
+-- Avatars are written only by the backend's service role, which enforces the
+-- size and image-type checks; `authenticated` has no storage.objects policies
+-- on this bucket. Objects are served through short-lived signed URLs.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'avatars',
+  'avatars',
+  false,
+  5242880,
+  array['image/jpeg', 'image/png', 'image/webp']
+)
+on conflict (id) do update set
+  public = false,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "Avatar files are publicly readable" on storage.objects;
+drop policy if exists "Users can upload their avatar files" on storage.objects;
+drop policy if exists "Users can update their avatar files" on storage.objects;
+drop policy if exists "Users can delete their avatar files" on storage.objects;
 
 grant select, update on table public.profiles to authenticated;
 grant select, update on table public.profiles to service_role;
