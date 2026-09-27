@@ -21,7 +21,15 @@ import type {
   ClassRecord,
   ClassesGateway,
 } from '../modules/classes/classes.types.js';
+import { randomUUID } from 'node:crypto';
+import {
+  AVATAR_BUCKET,
+  AVATAR_SIGNED_URL_TTL_SECONDS,
+  DEFAULT_AVATAR_PATH,
+  PENDING_AVATAR_MAX_AGE_MILLISECONDS,
+} from '../modules/profiles/profiles.types.js';
 import type {
+  ProfileAvatarUpload,
   ProfileRecord,
   UpdateProfileInput,
 } from '../modules/profiles/profiles.types.js';
@@ -145,11 +153,23 @@ export interface UserEmailLookupGateway {
 
 export interface ProfileGateway {
   getProfileByUserId(accessToken: string): Promise<ProfileRecord | null>;
+  uploadProfileAvatar(
+    accessToken: string,
+    userId: string,
+    contentType: string,
+    data: Buffer,
+  ): Promise<ProfileAvatarUpload>;
+  discardProfileAvatar(
+    accessToken: string,
+    userId: string,
+    uploadId: string,
+  ): Promise<boolean>;
   updateProfile(
     accessToken: string,
     userId: string,
     input: UpdateProfileInput,
   ): Promise<ProfileRecord | null>;
+  cleanupPendingProfileAvatars(): Promise<number>;
 }
 
 export interface RecentSearch {
@@ -219,6 +239,17 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
     active?: boolean;
     searchable?: boolean;
     rank?: number;
+  }
+
+  async function avatarUrl(path: string): Promise<string> {
+    if (adminClient === null) {
+      throw new Error('Supabase service role is required for avatar URLs');
+    }
+    const { data, error } = await adminClient.storage
+      .from(AVATAR_BUCKET)
+      .createSignedUrl(path, AVATAR_SIGNED_URL_TTL_SECONDS);
+    if (error !== null) throw error;
+    return data.signedUrl;
   }
 
   const campusColumns =
@@ -345,7 +376,7 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
     async getProfileByUserId(accessToken): Promise<ProfileRecord | null> {
       const { data, error } = await forAccessToken(accessToken)
         .from('profiles')
-        .select('display_name,email,role')
+        .select('display_name,email,role,avatar_path')
         .maybeSingle();
       if (error !== null) throw error;
       if (data === null) return null;
@@ -353,19 +384,42 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
         displayName: data.display_name as string,
         email: data.email as string | null,
         role: data.role as ProfileRecord['role'],
+        avatarUrl: await avatarUrl((data.avatar_path as string | null) ?? DEFAULT_AVATAR_PATH),
       };
     },
     async updateProfile(accessToken, userId, input): Promise<ProfileRecord | null> {
+      let avatarPath: string | undefined;
+      if (input.avatarUploadId !== undefined) {
+        if (adminClient === null) {
+          throw new Error('Supabase service role is required to commit avatars');
+        }
+        if (!/^[0-9a-f-]{36}$/i.test(input.avatarUploadId)) {
+          throw new Error('Invalid avatar path');
+        }
+        const pendingPath = `${userId}/pending/${input.avatarUploadId}`;
+        avatarPath = `${userId}/profile`;
+        const storage = adminClient.storage.from(AVATAR_BUCKET);
+        const download = await storage.download(pendingPath);
+        if (download.error !== null) throw download.error;
+        const upload = await storage.upload(avatarPath, download.data, {
+          upsert: true,
+          contentType: download.data.type || 'application/octet-stream',
+        });
+        if (upload.error !== null) throw upload.error;
+        const remove = await storage.remove([pendingPath]);
+        if (remove.error !== null) throw remove.error;
+      }
       const values = {
         ...(input.displayName === undefined ? {} : { display_name: input.displayName }),
         ...(input.email === undefined ? {} : { email: input.email }),
         ...(input.role === undefined ? {} : { role: input.role }),
+        ...(avatarPath === undefined ? {} : { avatar_path: avatarPath }),
       };
       const { data, error } = await forAccessToken(accessToken)
         .from('profiles')
         .update(values)
         .eq('id', userId)
-        .select('display_name,email,role')
+        .select('display_name,email,role,avatar_path')
         .maybeSingle();
       if (error !== null) throw error;
       if (data === null) return null;
@@ -373,7 +427,76 @@ export function createSupabaseResources(config: Environment): SupabaseResources 
         displayName: data.display_name as string,
         email: data.email as string | null,
         role: data.role as ProfileRecord['role'],
+        avatarUrl: await avatarUrl((data.avatar_path as string | null) ?? DEFAULT_AVATAR_PATH),
       };
+    },
+    async uploadProfileAvatar(_accessToken, userId, contentType, data) {
+      if (adminClient === null) {
+        throw new Error('Supabase service role is required for avatar uploads');
+      }
+      const uploadId = randomUUID();
+      const path = `${userId}/pending/${uploadId}`;
+      const { error } = await adminClient.storage.from(AVATAR_BUCKET).upload(path, data, {
+        contentType,
+        upsert: false,
+      });
+      if (error !== null) throw error;
+      return { uploadId, avatarUrl: await avatarUrl(path) };
+    },
+    async discardProfileAvatar(_accessToken, userId, uploadId) {
+      if (adminClient === null) {
+        throw new Error('Supabase service role is required for avatar deletion');
+      }
+      if (!/^[0-9a-f-]{36}$/i.test(uploadId)) return false;
+      const path = `${userId}/pending/${uploadId}`;
+      const storage = adminClient.storage.from(AVATAR_BUCKET);
+      const { data } = await storage.list(`${userId}/pending`, { search: uploadId, limit: 1 });
+      if ((data ?? []).length === 0) return false;
+      const { error } = await storage.remove([path]);
+      if (error !== null) throw error;
+      return true;
+    },
+    async cleanupPendingProfileAvatars() {
+      if (adminClient === null) return 0;
+      const storage = adminClient.storage.from(AVATAR_BUCKET);
+      const cutoff = Date.now() - PENDING_AVATAR_MAX_AGE_MILLISECONDS;
+      let deletedCount = 0;
+      for (let offset = 0; ; offset += 1_000) {
+        const { data: userEntries, error: userError } = await storage.list('', {
+          limit: 1_000,
+          offset,
+        });
+        if (userError !== null) throw userError;
+        if (userEntries.length === 0) break;
+        for (const userEntry of userEntries) {
+          if (
+            typeof userEntry.name !== 'string' ||
+            !/^[0-9a-f-]{36}$/i.test(userEntry.name)
+          ) continue;
+          const { data: pendingEntries, error: pendingError } = await storage.list(
+            `${userEntry.name}/pending`,
+            { limit: 1_000 },
+          );
+          if (pendingError !== null) throw pendingError;
+          const stalePaths: string[] = [];
+          for (const entry of pendingEntries) {
+            const timestamp = entry.created_at ?? entry.updated_at;
+            if (
+              typeof entry.name === 'string' &&
+              typeof timestamp === 'string' &&
+              Date.parse(timestamp) < cutoff
+            ) {
+              stalePaths.push(`${userEntry.name}/pending/${entry.name}`);
+            }
+          }
+          if (stalePaths.length === 0) continue;
+          const { error: removeError } = await storage.remove(stalePaths);
+          if (removeError !== null) throw removeError;
+          deletedCount += stalePaths.length;
+        }
+        if (userEntries.length < 1_000) break;
+      }
+      return deletedCount;
     },
     async listClasses(accessToken): Promise<ClassRecord[]> {
       const { data, error } = await forAccessToken(accessToken)

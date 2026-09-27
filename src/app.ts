@@ -3,6 +3,7 @@ import Fastify, {
   type FastifyInstance,
   type FastifyServerOptions,
 } from 'fastify';
+import multipart from '@fastify/multipart';
 import { TypeBoxValidatorCompiler } from '@fastify/type-provider-typebox';
 
 import { parseEnv, type Environment } from './config/env.js';
@@ -70,6 +71,9 @@ export async function buildApp(
   await app.register(errorHandlerPlugin);
   await app.register(corsPlugin);
   await app.register(rateLimitPlugin);
+  await app.register(multipart, {
+    limits: { files: 1, fileSize: 5 * 1024 * 1024 },
+  });
   await app.register(swaggerPlugin);
   await app.register(supabasePlugin, supabaseOptions);
   await app.register(mapboxSearchPlugin, {

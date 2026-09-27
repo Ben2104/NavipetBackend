@@ -21,6 +21,7 @@ describe('profiles', () => {
       displayName: 'Jane Doe',
       email: 'student@example.com',
       role: 'student',
+      avatarUrl: 'https://example.com/default-avatar.png',
     });
     app = await buildTestApp({}, {
       supabaseResources: { ...createSupabaseResources(TEST_ENV), getProfileByUserId },
@@ -35,7 +36,12 @@ describe('profiles', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
-      profile: { displayName: 'Jane Doe', email: 'student@example.com', role: 'student' },
+      profile: {
+        displayName: 'Jane Doe',
+        email: 'student@example.com',
+        role: 'student',
+        avatarUrl: 'https://example.com/default-avatar.png',
+      },
     });
     expect(getProfileByUserId).toHaveBeenCalledWith('valid-access-token');
   });
@@ -67,6 +73,7 @@ describe('profiles', () => {
       displayName: 'Professor Jane Doe',
       email: 'professor@example.com',
       role: 'professor',
+      avatarUrl: 'https://example.com/avatar.png',
     });
     app = await buildTestApp({}, {
       supabaseResources: { ...createSupabaseResources(TEST_ENV), updateProfile },
@@ -81,6 +88,7 @@ describe('profiles', () => {
         displayName: '  Professor Jane Doe  ',
         email: 'Professor@Example.com',
         role: 'professor',
+        avatarUploadId: '11111111-1111-4111-8111-111111111112',
       },
     });
 
@@ -90,6 +98,7 @@ describe('profiles', () => {
         displayName: 'Professor Jane Doe',
         email: 'professor@example.com',
         role: 'professor',
+        avatarUrl: 'https://example.com/avatar.png',
       },
     });
     expect(updateProfile).toHaveBeenCalledWith(
@@ -99,6 +108,7 @@ describe('profiles', () => {
         displayName: 'Professor Jane Doe',
         email: 'professor@example.com',
         role: 'professor',
+        avatarUploadId: '11111111-1111-4111-8111-111111111112',
       },
     );
   });
@@ -115,6 +125,70 @@ describe('profiles', () => {
       url: '/profiles/me',
       headers: { authorization: 'Bearer valid-access-token' },
       payload: { displayName: 'Jane Doe', timezone: 'PST' },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('accepts a WebP avatar as multipart form data', async () => {
+    const uploadProfileAvatar = vi.fn().mockResolvedValue({
+      uploadId: '22222222-2222-4222-8222-222222222222',
+      avatarUrl: 'https://example.com/avatar-preview',
+    });
+    app = await buildTestApp({}, {
+      supabaseResources: {
+        ...createSupabaseResources(TEST_ENV),
+        uploadProfileAvatar,
+      },
+      authVerifier: { verify: vi.fn<JwtVerifier['verify']>().mockResolvedValue(verifiedUser) },
+    });
+    const boundary = 'avatar-test-boundary';
+    const payload = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="avatar"; filename="avatar.webp"',
+      'Content-Type: image/webp',
+      '',
+      'webp-test-data',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/profiles/me/avatar',
+      headers: {
+        authorization: 'Bearer valid-access-token',
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      payload,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      uploadId: '22222222-2222-4222-8222-222222222222',
+      avatarUrl: 'https://example.com/avatar-preview',
+    });
+    expect(uploadProfileAvatar).toHaveBeenCalledWith(
+      'valid-access-token',
+      verifiedUser.id,
+      'image/webp',
+      expect.any(Buffer),
+    );
+  });
+
+  it('rejects an avatar path outside the authenticated user staging folder', async () => {
+    const updateProfile = vi.fn();
+    app = await buildTestApp({}, {
+      supabaseResources: { ...createSupabaseResources(TEST_ENV), updateProfile },
+      authVerifier: { verify: vi.fn<JwtVerifier['verify']>().mockResolvedValue(verifiedUser) },
+    });
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/profiles/me',
+      headers: { authorization: 'Bearer valid-access-token' },
+      payload: { avatarPath: 'other-user/pending/image.png' },
     });
 
     expect(response.statusCode).toBe(422);
