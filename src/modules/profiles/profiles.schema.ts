@@ -30,10 +30,13 @@ export const GetProfileRouteSchema = {
   tags: ['Profiles'],
   summary: 'Get the authenticated user profile',
   description:
-    'Returns the display name, email, and role for the currently logged-in ' +
-    'user. Requires `Authorization: Bearer <access_token>`.\n\n' +
-    '`avatarUrl` is a temporary signed URL that expires after approximately ' +
-    'one hour, or `null` when no avatar can be served.',
+    'Returns the display name, email, role, and avatar of the ' +
+    'authenticated user, as shown on the profile screen.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    '`avatarUrl` is a temporary signed URL that expires after about one ' +
+    'hour, so fetch the profile again rather than caching the URL.\n\n' +
+    '`avatarUrl` is `null` when no avatar can be served; show a local ' +
+    'placeholder instead.',
   security: [{ bearerAuth: [] }],
   response: {
     200: GetProfileResponseSchema,
@@ -70,11 +73,20 @@ export const UploadAvatarRouteSchema = {
   tags: ['Profiles'],
   summary: 'Upload a temporary profile avatar',
   description:
-    'Uploads one JPEG, PNG, or WebP image to temporary Storage. The returned ' +
-    '`uploadId` must be included in PATCH /profiles/me to permanently save ' +
-    'the avatar. If the user discards changes, call the DELETE endpoint instead. ' +
-    'Maximum size: 5 MB. The multipart field must be named `avatar`. The ' +
-    'returned preview URL is temporary and expires after approximately one hour.',
+    'Uploads one image as a temporary avatar. It is not the saved ' +
+    'profile avatar until it is committed.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    'Send `multipart/form-data` with the file in a field named ' +
+    '`avatar`.\n\n' +
+    'Accepted formats are JPEG, PNG, and WebP, up to 5 MB.\n\n' +
+    '---\n\n' +
+    '**To keep it:** send the returned `uploadId` as `avatarUploadId` in ' +
+    '`PATCH /profiles/me`.\n\n' +
+    '---\n\n' +
+    '**To discard it:** call `DELETE /profiles/me/avatar/{uploadId}`.\n\n' +
+    '---\n\n' +
+    'The returned `avatarUrl` is a preview link that expires after about ' +
+    'one hour.',
   security: [{ bearerAuth: [] }],
   consumes: ['multipart/form-data'],
   body: {
@@ -105,8 +117,13 @@ export const DeleteAvatarRouteSchema = {
   tags: ['Profiles'],
   summary: 'Discard a temporary profile avatar upload',
   description:
-    'Deletes a temporary avatar upload when the user cancels profile changes. ' +
-    'This endpoint must not be called after the uploadId has been committed.',
+    'Discards a temporary avatar upload, for when the user cancels their ' +
+    'profile changes.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    '`uploadId` is the value returned by `POST /profiles/me/avatar`.\n\n' +
+    'Do not call this after that `uploadId` has been committed through ' +
+    '`PATCH /profiles/me`.\n\n' +
+    'An upload that does not exist for this user returns 404.',
   security: [{ bearerAuth: [] }],
   params: Type.Object({ uploadId: Type.String({ format: 'uuid' }) }),
   response: {
@@ -123,13 +140,20 @@ export const UpdateProfileRouteSchema = {
   tags: ['Profiles'],
   summary: 'Update the authenticated user profile',
   description:
-    'Updates profile fields for the currently logged-in user. Requires ' +
-    '`Authorization: Bearer <access_token>`. To save a new avatar, first call ' +
-    'POST /profiles/me/avatar, then include its returned `uploadId` as ' +
-    '`avatarUploadId` in this request. Omitted fields keep their existing values. ' +
-    'The returned avatar URL is a temporary signed URL and expires after ' +
-    'approximately one hour. In Swagger, delete fields you do not want to change ' +
-    'before executing.',
+    'Updates the profile of the authenticated user and returns the saved ' +
+    'profile.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    'Send at least one field. Omitted fields keep their current values.\n\n' +
+    '`displayName` is trimmed and cannot be blank. `email` is trimmed ' +
+    'and lowercased.\n\n' +
+    '---\n\n' +
+    'To save a new avatar, first call `POST /profiles/me/avatar`, then ' +
+    'send its `uploadId` here as `avatarUploadId`.\n\n' +
+    '---\n\n' +
+    'The returned `avatarUrl` is a temporary signed URL that expires ' +
+    'after about one hour.\n\n' +
+    'In Swagger UI, delete the fields you do not want to change from the ' +
+    'example body before executing.',
   security: [{ bearerAuth: [] }],
   body: UpdateProfileBodySchema,
   response: {

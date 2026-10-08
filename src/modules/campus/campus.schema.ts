@@ -85,8 +85,33 @@ export const AutocompleteRouteSchema = {
   tags: ['Campus'],
   summary: 'Autocomplete campus destinations',
   description:
-    'Searches active, searchable CSULB destinations first. Proximity intents require latitude and longitude and never use external fallback. A temporary Mapbox result may be returned when ordinary local search has no routable outdoor destination.\n\n' +
-    'Requires a Supabase access token as a bearer credential.',
+    'Searches active, searchable CSULB campus destinations that match ' +
+    '`q`.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    '`q` must contain at least two meaningful characters, otherwise the ' +
+    'request returns 422.\n\n' +
+    '`limit` defaults to 10 and is capped at 20.\n\n' +
+    '`latitude` and `longitude` are optional but must be sent together.\n\n' +
+    '---\n\n' +
+    '### Proximity search\n\n' +
+    'These phrases search for the nearest matching places instead of ' +
+    'matching by name: "nearest restroom", "food near me", ' +
+    '"nearest parking", "closest bus stop", "coffee near me".\n\n' +
+    'They require `latitude` and `longitude`; without them the request ' +
+    'returns 422.\n\n' +
+    '---\n\n' +
+    'Only places within 2000 meters are returned, each with ' +
+    '`distanceMeters`, and the response gains a `proximity` object.\n\n' +
+    '---\n\n' +
+    '### Mapbox fallback\n\n' +
+    'When an ordinary search finds no campus destination with outdoor ' +
+    'coordinates, a temporary Mapbox result may be returned instead. ' +
+    'Proximity searches never do this.\n\n' +
+    'A Mapbox result has `external: true` and an `id` starting with ' +
+    '`mapbox:`.\n\n' +
+    '---\n\n' +
+    'It is not stored, so that `id` cannot be used with ' +
+    '`GET /places/{placeId}` or `POST /recent-searches`.',
   security: [{ bearerAuth: [] }],
   querystring: SearchQuerySchema,
   response: {
@@ -116,8 +141,17 @@ export const PlaceRouteSchema = {
   tags: ['Campus'],
   summary: 'Get one campus destination',
   description:
-    'Resolves a single active, searchable destination by its campus place UUID — the `id` returned by GET /autocomplete for local results. Temporary Mapbox results from autocomplete are not stored and carry a `mapbox:` prefixed `id`, so passing one fails UUID validation with 422 rather than 404; use the coordinates already present on that result instead. A 404 means the UUID is well-formed but no matching active, searchable destination exists.\n\n' +
-    'Requires a Supabase access token as a bearer credential.',
+    'Returns one active, searchable campus destination by its UUID.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    '`placeId` is the `id` of a campus result from `GET /autocomplete`.\n\n' +
+    '---\n\n' +
+    'A well-formed UUID with no matching active, searchable destination ' +
+    'returns 404.\n\n' +
+    'A temporary Mapbox result has a `mapbox:` prefixed `id`, which is ' +
+    'not a UUID and returns 422.\n\n' +
+    '---\n\n' +
+    'For those, use the coordinates already present on the autocomplete ' +
+    'result.',
   security: [{ bearerAuth: [] }],
   params: PlaceParamsSchema,
   response: {
@@ -151,8 +185,19 @@ export const RoomsRouteSchema = {
   tags: ['Campus'],
   summary: 'Search verified rooms in a building',
   description:
-    'Lists rooms inside one building, ranked by how closely they match `q`. `buildingCode` is the campus building code (for example `ECS`) and is matched case-insensitively — it is the `buildingCode` field on autocomplete results. `q` must contain at least two meaningful characters; whitespace inside it is ignored, so "101" and "1 01" match the same rooms. `limit` defaults to 10 and is capped at 20. Only active, searchable room records are returned — buildings, entrances, and other destination types never appear here. A 404 means the building code does not resolve to an active, searchable building.\n\n' +
-    'Requires a Supabase access token as a bearer credential.',
+    'Searches the rooms inside one building, best match for `q` first.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    '`buildingCode` is the campus building code, for example "ECS". It ' +
+    'is matched case-insensitively.\n\n' +
+    '---\n\n' +
+    '`q` must contain at least two meaningful characters. Whitespace ' +
+    'inside it is ignored, so "101" and "1 01" match the same rooms.\n\n' +
+    '`limit` defaults to 10 and is capped at 20.\n\n' +
+    'Only active, searchable rooms are returned — never buildings, ' +
+    'entrances, or other destination types.\n\n' +
+    'A building code that does not resolve to an active, searchable ' +
+    'building returns 404.\n\n' +
+    '`latitude` and `longitude` are accepted but ignored here.',
   security: [{ bearerAuth: [] }],
   params: RoomsParamsSchema,
   querystring: SearchQuerySchema,
