@@ -150,10 +150,13 @@ const commonErrors = {
 export const ListClassesRouteSchema = {
   tags: ['Classes'], summary: 'List the authenticated user classes', security: [{ bearerAuth: [] }],
   description:
-    'Requires a bearer access token from `POST /auth/login`.\n\n' +
-    'Use the `access_token` field from that response. The Swagger "Authorize" button above sends it as ' +
-    'the Authorization header for every request on this page.\n\n' +
-    'Returns every class on the authenticated user schedule, most-recently-created last.',
+    "Returns every class on the authenticated user's schedule, oldest " +
+    'first.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`, using the ' +
+    '`access_token` from `POST /auth/login`.\n\n' +
+    'In Swagger UI, paste the token into the "Authorize" button; it is ' +
+    'then sent with every request on this page.\n\n' +
+    'A user with no classes gets an empty array.',
   response: {
     200: Type.Object(
       { classes: Type.Array(ClassResponseSchema) },
@@ -166,15 +169,25 @@ export const ListClassesRouteSchema = {
 export const CreateClassRouteSchema = {
   tags: ['Classes'], summary: 'Add a class to the authenticated user schedule', security: [{ bearerAuth: [] }],
   description:
-    'Adds one class. Use the example request body below as a starting point — it already resolves.\n\n' +
-    '`building` accepts either a CSULB building name or code (resolved against the campus dataset) or a plain ' +
-    'address (forward-geocoded with Mapbox). Either way the stored class gets a resolved display name plus ' +
-    'latitude/longitude, used later for class-aware navigation.\n\n' +
-    'Send the time either as `time` (a CSULB range like "4-6:45PM") or as `startTime` + `endTime` ' +
-    '(24-hour or AM/PM). Sending both forms, neither, or an unparseable or ambiguous time returns 422.\n\n' +
-    'A request where the end time is not later than the start time returns 422.\n\n' +
-    'Set `isOnline: true` for an online class; `building` may then be omitted or empty.\n\n' +
+    "Adds one class to the authenticated user's schedule.\n\n" +
+    'Requires `Authorization: Bearer <access_token>`. The example request ' +
+    'body below works as sent.\n\n' +
+    '### Location\n\n' +
+    '`building` accepts a CSULB building name or code, or a plain street ' +
+    'address.\n\n' +
+    'Either way the saved class gets a resolved display name and ' +
+    'coordinates, used later for class-aware navigation. A building or ' +
+    'address that cannot be found returns 404.\n\n' +
+    'Set `isOnline: true` for an online class; `building` may then be ' +
+    'omitted or empty.\n\n' +
     'An in-person class with no `building` returns 422.\n\n' +
+    '### Time\n\n' +
+    'Send the time one of two ways: `time` as a CSULB range such as ' +
+    '"4-6:45PM", or `startTime` with `endTime`.\n\n' +
+    '---\n\n' +
+    'Sending both forms, neither form, or a time that cannot be read ' +
+    'returns 422.\n\n' +
+    'An end time that is not later than the start time returns 422.\n\n' +
     scheduleConflictDescription,
   body: Type.Object(ClassInputSchema, { additionalProperties: false }),
   response: {
@@ -191,15 +204,26 @@ export const CreateClassRouteSchema = {
 export const UpdateClassRouteSchema = {
   tags: ['Classes'], summary: 'Update one authenticated user class', security: [{ bearerAuth: [] }],
   description:
-    'Partial update: send only the fields being changed. An empty body returns 422.\n\n' +
-    'Omitting `building` leaves the stored coordinates untouched.\n\n' +
-    'Sending `building` re-resolves the coordinates the same way `POST /classes` does.\n\n' +
-    'Setting `isOnline: true` clears the coordinates. Setting `isOnline: false` resolves `building` ' +
-    '(the one sent, else the stored one); an empty building returns 422.\n\n' +
-    '`time` replaces both `startTime` and `endTime`; it cannot be combined with either.\n\n' +
-    'Changing `weekdays`, `time`, `startTime`, `endTime`, or `courseCode` re-checks the merged schedule: ' +
-    'the end time must stay later than the start time (422), and the class must not conflict with any ' +
-    'other class on the schedule (409).\n\n' +
+    "Changes one class on the authenticated user's schedule.\n\n" +
+    'Requires `Authorization: Bearer <access_token>`.\n\n' +
+    'Send only the fields being changed. An empty body returns 422.\n\n' +
+    '### Location\n\n' +
+    'Omitting `building` leaves the stored location untouched.\n\n' +
+    'Sending `building` resolves it again, the same way ' +
+    '`POST /classes` does.\n\n' +
+    '---\n\n' +
+    'Setting `isOnline: true` clears the stored coordinates.\n\n' +
+    'Setting `isOnline: false` resolves `building` — the one sent, else ' +
+    'the stored one. An empty building returns 422.\n\n' +
+    '### Time\n\n' +
+    '`time` replaces both `startTime` and `endTime` and cannot be ' +
+    'combined with either.\n\n' +
+    '---\n\n' +
+    'Changing `weekdays`, `time`, `startTime`, `endTime`, or ' +
+    '`courseCode` re-checks the whole class.\n\n' +
+    '---\n\n' +
+    'The end time must stay later than the start time (422), and the ' +
+    'class must not conflict with another class on the schedule (409).\n\n' +
     scheduleConflictDescription,
   params: ClassIdParamsSchema,
   body: Type.Partial(Type.Object(ClassInputSchema, { additionalProperties: false })),
@@ -216,6 +240,10 @@ export const UpdateClassRouteSchema = {
 
 export const DeleteClassRouteSchema = {
   tags: ['Classes'], summary: 'Delete one authenticated user class', security: [{ bearerAuth: [] }],
+  description:
+    "Permanently removes one class from the authenticated user's schedule.\n\n" +
+    'Requires `Authorization: Bearer <access_token>`. Takes no request body.\n\n' +
+    "A `classId` that is not on the authenticated user's schedule returns 404.",
   params: ClassIdParamsSchema,
   response: { 204: { description: 'Class deleted. No response body.' }, 404: ErrorResponseSchema('Class not found.'), ...commonErrors },
 };
