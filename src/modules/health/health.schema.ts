@@ -9,7 +9,12 @@ export const HealthRouteSchema = {
   tags: ['Health'],
   summary: 'Check API process liveness',
   description:
-    'Unauthenticated liveness probe used as the platform health check. Exempt from rate limiting and touches neither Supabase nor MultiSet, so it reports only that this process is accepting requests — not that its dependencies are healthy. Always returns 200 with { "status": "ok" } while the process is up.',
+    'Liveness probe used as the hosting platform health check.\n\n' +
+    'Public — no bearer token is needed, and it is exempt from rate ' +
+    'limiting.\n\n' +
+    'It reports only that this process is accepting requests. It does ' +
+    'not call Supabase or MultiSet, so a 200 says nothing about their ' +
+    'health.',
   response: {
     200: HealthResponseSchema,
   },
