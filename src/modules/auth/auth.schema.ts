@@ -30,14 +30,17 @@ export const LoginRouteSchema = {
   tags: ['Authentication'],
   summary: 'Sign in with email and password',
   description:
-    'Entry point for an existing, confirmed account.\n\n' +
-    'On success, send the returned `access_token` as ' +
-    '`Authorization: Bearer <access_token>` on any protected route (e.g. ' +
-    '`GET /auth/me`).\n\n' +
-    'Hold onto `refresh_token` to call `POST /auth/refresh` once the ' +
-    'access token expires.\n\n' +
-    'An unconfirmed account (see `POST /auth/register`) cannot log in ' +
-    'until its OTP is verified.',
+    'Signs in an existing, confirmed account and returns a session.\n\n' +
+    'Public — no bearer token is needed. The email is trimmed and ' +
+    'lowercased before it is checked.\n\n' +
+    '---\n\n' +
+    'Send the returned `access_token` as ' +
+    '`Authorization: Bearer <access_token>` on every protected route.\n\n' +
+    '---\n\n' +
+    'Keep `refresh_token` for `POST /auth/refresh` once the access token ' +
+    'expires.\n\n' +
+    'A newly registered account cannot sign in until its emailed code ' +
+    'has been confirmed through `POST /auth/verify-otp`.',
   body: LoginBodySchema,
   response: {
     200: LoginResponseSchema,
@@ -102,9 +105,17 @@ export const RegisterRouteSchema = {
   tags: ['Authentication'],
   summary: 'Register with first name, last name, email, and password',
   description:
-    'Never returns access or refresh tokens. The account remains ' +
-    'unconfirmed until the user verifies the code emailed to them via ' +
-    "POST /auth/verify-otp (type: 'register').",
+    'Creates an unconfirmed account and emails it a 6-digit verification ' +
+    'code.\n\n' +
+    'Public — no bearer token is needed. This call never returns access ' +
+    'or refresh tokens.\n\n' +
+    'Names and email are trimmed, and the email is lowercased, before ' +
+    'validation.\n\n' +
+    'The password needs 8 to 128 characters with at least one digit and ' +
+    'one special character.\n\n' +
+    '---\n\n' +
+    'Next step: submit the emailed code to `POST /auth/verify-otp` with ' +
+    '`type: "register"`. That call confirms the account and signs it in.',
   body: RegisterBodySchema,
   response: {
     200: RegisterResponseSchema,
@@ -132,13 +143,15 @@ export const RefreshRouteSchema = {
   tags: ['Authentication'],
   summary: 'Rotate a refresh token for a new access/refresh pair',
   description:
-    'Call this once the access token from `POST /auth/login` (or a prior ' +
-    '`/auth/refresh`) expires.\n\n' +
-    'Submits the current `refreshToken`; the response replaces both ' +
-    'tokens — the old refresh token is consumed and cannot be reused.\n\n' +
-    'Reusing an already-consumed refresh token revokes its entire token ' +
-    'family (401), so retry with the newest token only, never one already ' +
-    'exchanged.',
+    'Exchanges a refresh token for a new access/refresh pair.\n\n' +
+    'Public — no bearer token is needed. Call it once the current access ' +
+    'token expires.\n\n' +
+    'The response replaces both tokens. The submitted `refreshToken` is ' +
+    'consumed and cannot be used again.\n\n' +
+    'Reusing an already-consumed refresh token returns 401 and revokes ' +
+    'its entire token family, so always retry with the newest token.\n\n' +
+    'A recovery session from `POST /auth/verify-otp` cannot be refreshed ' +
+    'and also returns 401.',
   body: RefreshBodySchema,
   response: {
     200: LoginResponseSchema,
@@ -157,13 +170,14 @@ export const LogoutRouteSchema = {
   tags: ['Authentication'],
   summary: 'Revoke the current session',
   description:
-    'Requires `Authorization: Bearer <access_token>` from `/auth/login` ' +
-    'or `/auth/refresh`.\n\n' +
-    'Revokes only the refresh-token family tied to that access token — ' +
-    'other active sessions for the same user are unaffected.\n\n' +
-    'To test: log in, copy `access_token` into the "Authorize" button in ' +
-    'Swagger UI (or an `Authorization` header), then call this. A second ' +
-    'call with the same token still returns 204 (idempotent).',
+    'Signs out the session that the bearer access token belongs to.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`. Takes no request ' +
+    'body.\n\n' +
+    'Only that session is revoked — the same user stays signed in on ' +
+    'other devices. Use `POST /auth/logout-all` to end every session.\n\n' +
+    'To test: sign in, paste `access_token` into the "Authorize" button ' +
+    'in Swagger UI, then execute.\n\n' +
+    'A repeat call for an already-revoked session still returns 204.',
   security: [{ bearerAuth: [] }],
   response: {
     204: {
@@ -189,12 +203,13 @@ export const LogoutAllRouteSchema = {
   tags: ['Authentication'],
   summary: 'Revoke every session for the authenticated user',
   description:
-    'Requires `Authorization: Bearer <access_token>`.\n\n' +
-    'Unlike `/auth/logout`, this revokes every refresh session belonging ' +
-    'to the authenticated user across all devices — use it for "sign out ' +
-    'everywhere".\n\n' +
-    'After this call, every previously issued access/refresh pair for the ' +
-    'user stops working; a fresh `/auth/login` is required.',
+    'Signs the authenticated user out everywhere.\n\n' +
+    'Requires `Authorization: Bearer <access_token>`. Takes no request ' +
+    'body.\n\n' +
+    'Unlike `POST /auth/logout`, this revokes every session the user has ' +
+    'on every device.\n\n' +
+    'Afterwards no previously issued token pair works; the user must ' +
+    'sign in again with `POST /auth/login`.',
   security: [{ bearerAuth: [] }],
   response: {
     204: {
@@ -236,12 +251,12 @@ export const MeRouteSchema = {
   tags: ['Authentication'],
   summary: 'Get the authenticated user',
   description:
+    'Returns the account that the bearer access token belongs to.\n\n' +
     'Requires `Authorization: Bearer <access_token>`.\n\n' +
-    'Use this to check whether a token is still valid and to read the ' +
-    'account it belongs to.\n\n' +
-    'Returns 403 if the account has since been disabled and 404 if the ' +
-    'account was deleted after the token was issued — both distinct from ' +
-    'the 401 returned for a bad/expired token itself.',
+    'Use it to check that a token still works and to read the account ' +
+    'id, email, status, and creation time.\n\n' +
+    'A bad or expired token returns 401. A valid token returns 403 when ' +
+    'the account has been disabled and 404 when it has been deleted.',
   security: [{ bearerAuth: [] }],
   response: {
     200: MeResponseSchema,
@@ -282,14 +297,14 @@ export const ForgotPasswordRouteSchema = {
   tags: ['Authentication'],
   summary: 'Request a password reset verification code by email',
   description:
-    'First step of the password recovery flow.\n\n' +
-    'Reveals whether the email belongs to a registered account: 404 if it ' +
-    "does not.\n\n" +
-    "This is an intentional product choice, not this repo's default — " +
-    'most account-existence-revealing endpoints in this API (e.g. ' +
-    '`/auth/login`) deliberately return a generic response instead.\n\n' +
-    'To test: submit an existing account\'s email, then check that inbox ' +
-    'for a 6-digit code and continue with `POST /auth/verify-otp` using ' +
+    'First step of password recovery: emails a 6-digit verification code ' +
+    'to an existing account.\n\n' +
+    'Public — no bearer token is needed. The email is trimmed and ' +
+    'lowercased before the lookup.\n\n' +
+    'An email with no account returns 404. This is a deliberate product ' +
+    'choice; `POST /auth/login` hides whether an account exists.\n\n' +
+    '---\n\n' +
+    'Next step: submit the emailed code to `POST /auth/verify-otp` with ' +
     '`type: "recovery"`.',
   body: ForgotPasswordBodySchema,
   response: {
@@ -358,30 +373,32 @@ export const VerifyOtpRouteSchema = {
   tags: ['Authentication'],
   summary: 'Verify a one-time code for password reset or signup email confirmation',
   description:
-    'One endpoint, two independent flows selected by `type`. Use the ' +
-    '"Examples" dropdown on the request body below to load a sample ' +
-    'payload for either one.\n\n' +
+    'Confirms an emailed 6-digit code and returns a session. One ' +
+    'endpoint serves two flows, selected by `type`.\n\n' +
+    'Public — no bearer token is needed. Use the "Examples" dropdown on ' +
+    'the request body below to load a sample payload for either flow.\n\n' +
     '---\n\n' +
     '### Password reset — `type: "recovery"`\n\n' +
     '**Step 1.** `POST /auth/forgot-password` with `{ "email" }`.\n\n' +
-    '**Step 2.** Check that inbox for a 6-digit code.\n\n' +
+    '**Step 2.** Read the 6-digit code from that inbox.\n\n' +
     '**Step 3.** `POST /auth/verify-otp` with ' +
     '`{ "email", "code", "type": "recovery" }`.\n\n' +
-    '**Step 4.** On success this returns `access_token` / `refresh_token`. ' +
-    'Use the `access_token` as the Bearer credential on ' +
-    '`POST /auth/reset-password` to set a new password.\n\n' +
+    '**Step 4.** Use the returned `access_token` as the Bearer credential ' +
+    'on `POST /auth/reset-password`.\n\n' +
+    'This is a recovery session: it works only for the password reset. ' +
+    'Other protected routes reject it with 401, and it cannot be ' +
+    'refreshed.\n\n' +
     '---\n\n' +
     '### Signup email confirmation — `type: "register"`\n\n' +
     '**Step 1.** `POST /auth/register` with the new account details.\n\n' +
-    '**Step 2.** Check that inbox for a 6-digit code.\n\n' +
+    '**Step 2.** Read the 6-digit code from that inbox.\n\n' +
     '**Step 3.** `POST /auth/verify-otp` with ' +
     '`{ "email", "code", "type": "register" }`.\n\n' +
-    '**Step 4.** On success this returns `access_token` / `refresh_token` — ' +
-    'the account is now confirmed and this is a normal login session, no ' +
-    'separate `POST /auth/login` call needed.\n\n' +
+    '**Step 4.** The account is now confirmed and the returned tokens are ' +
+    'a normal session. No separate `POST /auth/login` call is needed.\n\n' +
     '---\n\n' +
-    'A wrong or expired code returns the same 401 for both flows, so the ' +
-    'response never reveals whether a code was ever valid.',
+    'A wrong code and an expired code return the same 401 in both flows, ' +
+    'so the response never reveals whether a code was ever valid.',
   body: VerifyOtpBodySchema,
   response: {
     200: VerifyOtpSessionResponseSchema,
@@ -415,23 +432,28 @@ export const ResetPasswordRouteSchema = {
   tags: ['Authentication'],
   summary: 'Set a new password using a verified recovery session',
   description:
-    'Requires a recovery `access_token` as the Bearer credential — not a ' +
-    'normal login session.\n\n' +
+    'Last step of password recovery: sets a new password.\n\n' +
+    'Requires a recovery `access_token` as the Bearer credential. A ' +
+    'normal login token is rejected with 401.\n\n' +
     '---\n\n' +
     'To test: call `POST /auth/forgot-password`, then ' +
     '`POST /auth/verify-otp` with `type: "recovery"`.\n\n' +
-    'That returns an `access_token` — use it here as the Bearer ' +
-    'credential, with matching `newPassword` / `confirmPassword`.\n\n' +
     '---\n\n' +
-    'The new password must differ from the previous one.',
+    'Paste the `access_token` from that response into the "Authorize" ' +
+    'button, then send matching `newPassword` and `confirmPassword`.\n\n' +
+    '---\n\n' +
+    'The password needs 8 to 128 characters with at least one uppercase ' +
+    'letter and one digit, and must differ from the previous one.\n\n' +
+    'A successful reset signs the user out everywhere, including this ' +
+    'recovery session. Sign in again with `POST /auth/login`.',
   security: [{ bearerAuth: [] }],
   body: ResetPasswordBodySchema,
   response: {
     204: {
       description:
-        'Password reset. No response body. The recovery session used to ' +
-        'authenticate this request remains valid; Supabase revokes the ' +
-        "user's other active sessions.",
+        'Password changed. No response body. The recovery session used ' +
+        "for this request and the user's other active sessions are " +
+        'revoked.',
     },
     400: ErrorResponseSchema('Malformed JSON body.'),
     401: ErrorResponseSchema(
